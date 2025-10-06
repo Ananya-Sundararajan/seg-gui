@@ -2,7 +2,7 @@
 _commit: v1.1.0
 _src_path: https://github.com/napari/napari-plugin-template
 display_name: Segmentation Gui
-email: axs2175@case.edu
+email: ananya.sundararajan@case.edu
 full_name: Ananya Sundararajan
 github_repository_url: https://github.com/Ananya-Sundararajan/seg-gui
 github_username_or_organization: Ananya-Sundararajan
