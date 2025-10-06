@@ -6,7 +6,7 @@ readme = "README.md"
 license = {file = "LICENSE"}
 authors = [
   {name = "Ananya Sundararajan"},
-  {email = "axs2175@case.edu"},
+  {email = "ananya.sundararajan@case.edu"},
 ]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
@@ -30,8 +30,11 @@ requires-python = ">=3.10"
 # See best practices: https://napari.org/stable/plugins/building_a_plugin/best_practices.html
 dependencies = [
     "numpy",
-    "magicgui",
+    "imagio",
+    "tifffile",
+    "natsort",
     "qtpy",
+    "napari",
     "scikit-image",
 ]
 
