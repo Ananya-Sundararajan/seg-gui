@@ -41,6 +41,8 @@ pip install "seg-gui[all]"
 To install latest development version :
 
 ```
+pip install "git+https://github.com/Ananya-Sundararajan/seg-gui.git#egg=seg-gui[all]"
+or
 pip install git+https://github.com/Ananya-Sundararajan/seg-gui.git
 ```
 
