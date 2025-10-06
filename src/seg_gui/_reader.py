@@ -84,7 +84,7 @@ def reader_function(path):
     )
     mask_files = (
         natsorted(list(mask_dir.glob("*.tif")))
-        if mask_dir == ".tif"
+        if mask_ext == ".tif"
         else natsorted(list(mask_dir.glob("*.png")))
     )
 
@@ -94,10 +94,15 @@ def reader_function(path):
         raise ValueError("No .tif or .png files found in masks/.")
 
     # Load into stacks
-    images = [tiff.imread(f) for f in image_files if image_ext == ".tif"]
-    images = [imageio.imread(f) for f in image_files if image_ext == ".png"]
-    masks = [tiff.imread(f) for f in mask_files if image_ext == ".tif"]
-    masks = [imageio.imread(f) for f in mask_files if mask_ext == ".png"]
+    if image_ext == ".tif":
+        images = [tiff.imread(f) for f in image_files]
+    else:
+        images = [imageio.imread(f) for f in image_files]
+
+    if mask_ext == ".tif":
+        masks = [tiff.imread(f) for f in mask_files]
+    else:
+        masks = [imageio.imread(f) for f in mask_files]
 
     images_stack = np.stack(images)
     masks_stack = np.stack(masks)
