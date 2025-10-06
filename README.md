@@ -44,36 +44,19 @@ To install latest development version :
 pip install git+https://github.com/Ananya-Sundararajan/seg-gui.git
 ```
 
+## To Use
+1. Data Formatting
+    Your images and masks should be in separate folders named "images" and "masks" respectively. The images and masks folder should then be in the same directory with no other folders/files in this directory.
 
+2. Loading the data.
+    Open napari and click the Seg Gui plugin. Once the seg-gui plugin is open, you should be able to drag the directory that the images and masks folders are in to the seg_gui docker (not the viewer in the middle, but the right-hand panel) to load. Alternatively, you can selet the directory through the load folder button at the bottom of the docker.
 
-## Contributing
+3. Validating the data.
+    You should be able to hide all masks, delete a specific mask, toggle masks individually on and off, toggle layers on and off, and scroll using 'next' and 'previous' buttons. To check a masks validity in neighboring slices, you can hide the current image layers and show the previous image or the next image.
 
-Contributions are very welcome. Tests can be run with [tox], please ensure
-the coverage at least stays the same before you submit a pull request.
+    After toggling image layers, make sure the mask layer is selected so that you can continue adding masks. You can add masks using napari's layer controls (either paintbrush or polygon work well for our purposes).
 
-## License
+    ** When adding masks, the most important thing to note is that you must hit the refresh mask button for the system to trigger the saving of the added masks to the original stack and to the list on the panel (was the cleaner way to ensure new masks were always saved).
 
-Distributed under the terms of the [MIT] license,
-"seg-gui" is free and open source software
-
-## Issues
-
-If you encounter any problems, please [file an issue] along with a detailed description.
-
-[napari]: https://github.com/napari/napari
-[copier]: https://copier.readthedocs.io/en/stable/
-[@napari]: https://github.com/napari
-[MIT]: http://opensource.org/licenses/MIT
-[BSD-3]: http://opensource.org/licenses/BSD-3-Clause
-[GNU GPL v3.0]: http://www.gnu.org/licenses/gpl-3.0.txt
-[GNU LGPL v3.0]: http://www.gnu.org/licenses/lgpl-3.0.txt
-[Apache Software License 2.0]: http://www.apache.org/licenses/LICENSE-2.0
-[Mozilla Public License 2.0]: https://www.mozilla.org/media/MPL/2.0/index.txt
-[napari-plugin-template]: https://github.com/napari/napari-plugin-template
-
-[file an issue]: https://github.com/Ananya-Sundararajan/seg-gui/issues
-
-[napari]: https://github.com/napari/napari
-[tox]: https://tox.readthedocs.io/en/latest/
-[pip]: https://pypi.org/project/pip/
-[PyPI]: https://pypi.org/
+4. Saving the masks.
+    Select the mask_stack layer, navigate to "Files," and export by clicking "save selected layers."

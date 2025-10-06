@@ -1,7 +1,7 @@
 # Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
 _commit: v1.1.0
 _src_path: https://github.com/napari/napari-plugin-template
-display_name: Seg Gui
+display_name: Segmentation Gui
 email: axs2175@case.edu
 full_name: Ananya Sundararajan
 github_repository_url: https://github.com/Ananya-Sundararajan/seg-gui

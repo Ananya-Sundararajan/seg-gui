@@ -6,11 +6,16 @@ implement multiple readers or even other plugin contributions. see:
 https://napari.org/stable/plugins/building_a_plugin/guides.html#readers
 """
 
+from pathlib import Path
+
+import imageio
 import numpy as np
+import tifffile as tiff
+from natsort import natsorted
 
 
 def napari_get_reader(path):
-    """A basic implementation of a Reader contribution.
+    """An implementation of a Reader contribution.
 
     Parameters
     ----------
@@ -23,14 +28,10 @@ def napari_get_reader(path):
         If the path is a recognized format, return a function that accepts the
         same path or list of paths, and returns a list of layer data tuples.
     """
-    if isinstance(path, list):
-        # reader plugins may be handed single path, or a list of paths.
-        # if it is a list, it is assumed to be an image stack...
-        # so we are only going to look at the first file.
-        path = path[0]
+    path = Path(path)
 
     # if we know we cannot read the file, we immediately return None.
-    if not path.endswith(".npy"):
+    if not path.is_dir():
         return None
 
     # otherwise we return the *function* that can read ``path``.
@@ -59,15 +60,49 @@ def reader_function(path):
         layer. Both "meta", and "layer_type" are optional. napari will
         default to layer_type=="image" if not provided
     """
-    # handle both a string and a list of strings
-    paths = [path] if isinstance(path, str) else path
-    # load all files into array
-    arrays = [np.load(_path) for _path in paths]
-    # stack arrays into single array
-    data = np.squeeze(np.stack(arrays))
+    path = Path(path)
 
-    # optional kwargs for the corresponding viewer.add_* method
-    add_kwargs = {}
+    # paths
+    image_dir = path / "images"
+    mask_dir = path / "masks"
 
-    layer_type = "image"  # optional, default is "image"
-    return [(data, add_kwargs, layer_type)]
+    if not image_dir.exists() or not mask_dir.exists():
+        raise ValueError(
+            "Input directory must contain 'images/' and 'masks/' subfolders."
+        )
+
+    image_ext = next(
+        image_dir.glob("*.*")
+    ).suffix  # take the first file's suffix
+    mask_ext = next(mask_dir.glob("*.*")).suffix
+
+    # Collect files
+    image_files = (
+        natsorted(list(image_dir.glob("*.tif")))
+        if image_ext == ".tif"
+        else natsorted(list(image_dir.glob("*.png")))
+    )
+    mask_files = (
+        natsorted(list(mask_dir.glob("*.tif")))
+        if mask_dir == ".tif"
+        else natsorted(list(mask_dir.glob("*.png")))
+    )
+
+    if len(image_files) == 0:
+        raise ValueError("No .tif or .png files found in images/.")
+    if len(mask_files) == 0:
+        raise ValueError("No .tif or .png files found in masks/.")
+
+    # Load into stacks
+    images = [tiff.imread(f) for f in image_files if image_ext == ".tif"]
+    images = [imageio.imread(f) for f in image_files if image_ext == ".png"]
+    masks = [tiff.imread(f) for f in mask_files if image_ext == ".tif"]
+    masks = [imageio.imread(f) for f in mask_files if mask_ext == ".png"]
+
+    images_stack = np.stack(images)
+    masks_stack = np.stack(masks)
+
+    return [
+        (images_stack, {"name": "images_stack"}, "image"),
+        (masks_stack, {"name": "masks_stack"}, "labels"),
+    ]

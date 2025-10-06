@@ -25,26 +25,19 @@ contributions:
       python_name: seg_gui:threshold_autogenerate_widget
       title: Make threshold function widget
     - id: seg-gui.make_qwidget
-      python_name: seg_gui:ExampleQWidget
-      title: Make example QWidget
+      python_name: seg_gui:SegmentationEditor
+      title: Widget for Segmentation Editing
   readers:
     - command: seg-gui.get_reader
-      accepts_directories: false
-      filename_patterns: ['*.npy']
+      accepts_directories: true
+      filename_patterns: ['*.tif', '*.png']
   writers:
     - command: seg-gui.write_multiple
       layer_types: ['image*','labels*']
       filename_extensions: []
     - command: seg-gui.write_single_image
       layer_types: ['image']
-      filename_extensions: ['.npy']
+      filename_extensions: ['.tif', '*.png']
   widgets:
-    - command: seg-gui.make_container_widget
-      display_name: Container Threshold
-    - command: seg-gui.make_magic_widget
-      display_name: Magic Threshold
-    - command: seg-gui.make_function_widget
-      autogenerate: true
-      display_name: Autogenerate Threshold
     - command: seg-gui.make_qwidget
-      display_name: Example QWidget
+      display_name: Segmentation Editor
