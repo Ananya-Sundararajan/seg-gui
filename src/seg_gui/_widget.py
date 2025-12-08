@@ -1,10 +1,13 @@
 from typing import TYPE_CHECKING
 
+import dask.array as da
+import imageio.v3 as iio
 import numpy as np
 from qtpy.QtWidgets import (
     QCheckBox,
     QFileDialog,
     QHBoxLayout,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -17,24 +20,27 @@ if TYPE_CHECKING:
 
 class SegmentationEditor(QWidget):
 
-    # initialize with all attributes and widget layout
     def __init__(self, viewer: "napari.viewer.Viewer"):
         super().__init__()
         self.viewer = viewer
         self.current_idx = 0
-        self.images_stack = None  # all image data (array form) in order
-        self.masks_stack = (
-            None  # all mask data (array fotm), same order as images
-        )
-        self.images_stack_layer = None
-        self.masks_stack_layer = None
+        self.total_slices = 0
+
+        self.image_stacks: list[da.Array] = None
+        # Masks stack remains a List[np.ndarray] (Mutable)
+        self.masks_stack: list[np.ndarray] = None
+
+        # Layer references
         self.middle_mask_layer = None
         self.prev_image_layer = None
         self.middle_image_layer = None
         self.next_image_layer = None
+
+        self.visible_ids = None
+
         self.current_mask_ids = []
 
-        self.setAcceptDrops(True)  # for drag and drop
+        self.setAcceptDrops(True)
 
         """ Buttons """
         self.prevBtn = QPushButton("< Previous")
@@ -52,9 +58,14 @@ class SegmentationEditor(QWidget):
         self.refreshBtn = QPushButton("Refresh Masks")
         self.refreshBtn.clicked.connect(self.on_mask_changed)
 
+        self.showAllBtn = QPushButton("Show All")
+        self.showAllBtn.clicked.connect(self.show_clicked)
+
+        self.exportStackBtn = QPushButton("Export Masks (Stack)")
+        self.exportStackBtn.clicked.connect(self.export_masks)
+
         """ Layouts """
         mainLayout = QVBoxLayout()
-
         scrollLayout = QHBoxLayout()
         scrollLayout.addWidget(self.prevBtn)
         scrollLayout.addWidget(self.nextBtn)
@@ -64,8 +75,11 @@ class SegmentationEditor(QWidget):
 
         togLayout = QHBoxLayout()
         togLayout.addWidget(self.hideAllBtn)
+        togLayout.addWidget(self.showAllBtn)
 
-        # masks checkbox scroll area
+        exportLayout = QHBoxLayout()
+        exportLayout.addWidget(self.exportStackBtn)
+
         self.checkboxArea = QScrollArea()
         self.checkboxContainer = QWidget()
         self.checkboxLayout = QVBoxLayout()
@@ -78,10 +92,12 @@ class SegmentationEditor(QWidget):
         mainLayout.addLayout(togLayout)
         mainLayout.addWidget(self.checkboxArea)
         mainLayout.addWidget(self.loadFolderBtn)
+        mainLayout.addLayout(exportLayout)
 
         self.setLayout(mainLayout)
 
-    # load folder (load folder button to set up panels)
+    # --- DATA LOADING --
+
     def load_folder(self):
         folder = QFileDialog.getExistingDirectory(
             self, "Select Dataset Folder"
@@ -90,338 +106,440 @@ class SegmentationEditor(QWidget):
             return
         from ._reader import reader_function
 
-        images_stack, masks_stack = reader_function(
-            folder
-        )  # get the data (tuple format)
-        self.load_data(
-            images_stack[0], masks_stack[0]
-        )  # initialize for validation-specific set-up
+        # reader_function returns a list of tuples: [(img1_da, ...), (img2_da, ...), ..., (mask_da, ...)]
+        layer_data = reader_function(folder)
 
-    # load the data - not actually being called, of no use
-    def load_data(self, images_stack, masks_stack):
-        self.images_stack = images_stack
-        self.images_stack_layer = self.viewer.add_image(
-            self.images_stack,  # entire stack
-            name="Images Stack",
-            visible=False,
-        )
-        self.masks_stack = masks_stack
-        self.masks_stack_layer = self.viewer.add_labels(
-            self.masks_stack, name="Masks Stack", visible=False  # entire stack
-        )
+        # Extract only the Dask arrays (index [0] of each tuple)
+        all_dask_stacks = [data[0] for data in layer_data]
+
+        # pop the last item (which is always the mask stack)
+        masks_stack = all_dask_stacks.pop()
+
+        # The remaining items are the image channel stacks (now a list of Dask arrays)
+        image_stacks = all_dask_stacks
+
+        # Pass the list of image stacks and the single mask stack to load_data
+        self.load_data(image_stacks, masks_stack)
+
+    def load_data(self, image_stacks: list[da.Array], masks_stack: da.Array):
+
+        self.image_stacks = image_stacks  # List of Dask arrays
         self.current_idx = 0
 
-        self.update_panels()  # load in setup
+        if self.image_stacks:
+            self.total_slices = self.image_stacks[0].shape[0]
+        else:
+            self.total_slices = 0
 
-    # detect the drag and drop event
+        self.masks_stack = [
+            masks_stack[i].compute() for i in range(masks_stack.shape[0])
+        ]
+
+        self.update_panels()
+
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
 
-    # triggered by the drag and drop
     def dropEvent(self, event):
         folder = event.mimeData().urls()[0].toLocalFile()
         from ._reader import reader_function
 
-        images_stack, masks_stack = reader_function(folder)
-        self.load_data(images_stack[0], masks_stack[0])
+        layer_data = reader_function(folder)
+        all_dask_stacks = [data[0] for data in layer_data]
 
-    # update panels, called when next or previous buttons are clicked
-    def update_panels(self):
+        masks_stack = all_dask_stacks.pop()
+        image_stacks = all_dask_stacks
 
-        # check if there is anything loaded first
-        if self.images_stack is None or self.masks_stack is None:
+        self.load_data(image_stacks, masks_stack)
+
+    # image stacking helper if more than one image folder is uploaded
+    def _get_stacked_slice(self, index: int) -> np.ndarray:
+        """Computes and stacks the slice at 'index' from all image channels into a (C, H, W) array."""
+        if not self.image_stacks:
+            # Fallback for empty image stack
+            return np.zeros(self.masks_stack[0].shape, dtype=np.uint8)
+
+        slices = [stack[index].compute() for stack in self.image_stacks]
+
+        # Stack slices along a new axis (axis=0) for napari multi-channel view
+        stacked_data = np.stack(slices, axis=0)
+        return stacked_data
+
+    # --- LAYER INITIALIZATION (RUNS ONCE) ---
+
+    def _initialize_layers(self):
+        """Creates all napari layers ONCE when data is first loaded."""
+
+        if not self.image_stacks:
+            QMessageBox.critical(self, "Init Error", "No image stacks loaded.")
             return
 
-        # define idxes to extract images
-        prev_idx = self.current_idx - 1
-        next_idx = self.current_idx + 1
+        single_slice_shape = self.masks_stack[0].shape
+        C = len(self.image_stacks)
+        zero_stack_shape = (C,) + single_slice_shape
+        zero_dtype = self.image_stacks[0].dtype
+        max_idx = self.total_slices - 1
 
-        # remove any previous layers
-        if (
-            self.middle_mask_layer is not None
-            and self.middle_mask_layer in self.viewer.layers
-        ):
-            self.viewer.layers.remove(self.middle_mask_layer)
-            self.middle_mask_layer = None
-
-        for layer in [
-            self.prev_image_layer,
-            self.middle_image_layer,
-            self.next_image_layer,
-        ]:
-            if layer is not None and layer in self.viewer.layers:
-                self.viewer.layers.remove(layer)
-
-        # update layers
-        self.next_image_layer = (
-            self.viewer.add_image(
-                self.images_stack[next_idx],
-                name="Pos" + str(next_idx) + " - Next",
-                visible=True,
-            )
-            if next_idx <= self.images_stack.shape[0] - 1
-            else None
+        # 1. Previous Layer (start as invisible placeholder)
+        prev_data = np.zeros(zero_stack_shape, dtype=zero_dtype)
+        self.prev_image_layer = self.viewer.add_image(
+            prev_data, name="Previous", visible=False
         )
 
-        self.prev_image_layer = (
-            self.viewer.add_image(
-                self.images_stack[prev_idx],
-                name="Pos" + str(prev_idx) + " - Previous",
-                visible=True,
-            )
-            if prev_idx >= 0
-            else None
+        # 3. Next Layer
+        if max_idx >= 1:
+            next_data = self._get_stacked_slice(self.current_idx + 1)
+            next_visible = True
+            next_name = f"Pos{self.current_idx + 1} - Next"
+        else:
+            next_data = np.zeros(zero_stack_shape, dtype=zero_dtype)
+            next_visible = False
+            next_name = "Next (Placeholder)"
+
+        self.next_image_layer = self.viewer.add_image(
+            next_data, name=next_name, visible=next_visible
         )
 
+        # 2. Current Layer (load the first frame)
+        current_data = self._get_stacked_slice(self.current_idx)
         self.middle_image_layer = self.viewer.add_image(
-            self.images_stack[self.current_idx],
-            name="Pos" + str(self.current_idx) + " - Current",
+            current_data, name=f"Pos{self.current_idx} - Current"
         )
 
+        # 4. Current Mask Layer
+        mask_data = self.masks_stack[self.current_idx]
         self.middle_mask_layer = self.viewer.add_labels(
-            self.masks_stack[self.current_idx].copy(),
-            name="Pos" + str(self.current_idx) + " masks",
+            mask_data.copy(), name=f"Pos{self.current_idx} masks"
         )
+
+        # Move mask layer to the top and select it
         self.viewer.layers.move(
             self.viewer.layers.index(self.middle_mask_layer),
             len(self.viewer.layers) - 1,
         )
         self.viewer.layers.selection.active = self.middle_mask_layer
 
-        # Extract IDs for checkboxes
+        self._update_ui_state()
+
+    # --- LAYER UPDATE (RUNS ON EVERY CLICK) ---
+
+    def _update_layer_data(self):
+        """Updates the data of existing layers (very fast)."""
+
+        idx = self.current_idx
+        max_idx = self.total_slices - 1
+
+        # 1. Compute and assign data for Current Layer first (uses stacking helper)
+        current_data = self._get_stacked_slice(idx)
+        self.middle_image_layer.data = current_data
+        self.middle_image_layer.name = f"Pos{idx} - Current"
+
+        # Get settings from the layer the user is currently interacting with
+        current_clim = self.middle_image_layer.contrast_limits
+        current_cmap = self.middle_image_layer.colormap.name
+
+        # 2. Previous Layer Update
+        prev_idx = idx - 1
+        if prev_idx >= 0:
+            new_data = self._get_stacked_slice(prev_idx)
+            self.prev_image_layer.data = new_data
+            self.prev_image_layer.name = f"Pos{prev_idx} - Previous"
+            self.prev_image_layer.visible = True
+
+            # Apply CURRENT settings to PREVIOUS layer
+            self.prev_image_layer.contrast_limits = current_clim
+            self.prev_image_layer.colormap = current_cmap
+        else:
+            self.prev_image_layer.visible = False
+
+        # 3. Next Layer Update
+        next_idx = idx + 1
+        if next_idx <= max_idx:
+            new_data = self._get_stacked_slice(next_idx)
+            self.next_image_layer.data = new_data
+            self.next_image_layer.name = f"Pos{next_idx} - Next"
+            self.next_image_layer.visible = True
+
+            # Apply CURRENT settings to NEXT layer
+            self.next_image_layer.contrast_limits = current_clim
+            self.next_image_layer.colormap = current_cmap
+        else:
+            self.next_image_layer.visible = False
+
+        # 4. Mask Layer Update
+        self.middle_mask_layer.data = self.masks_stack[idx].copy()
+        self.middle_mask_layer.name = f"Pos{idx} masks"
+
+        self._update_ui_state()
+
+    def _update_ui_state(self):
+        """Helper to sync IDs, checkbox list, and next label ID."""
+
         self.current_mask_ids = np.unique(self.middle_mask_layer.data)
         self.current_mask_ids = self.current_mask_ids[
             self.current_mask_ids != 0
         ]
-        self.imageLabel = "Pos" + str(self.current_idx) + " Masks"
 
-        # update glom checkbox view
         self.update_mask_list()
 
-        # for adding
-        if self.current_mask_ids is not None:
+        if (
+            self.current_mask_ids is not None
+            and self.current_mask_ids.size > 0
+        ):
             next_id = max(self.current_mask_ids) + 1
         else:
             next_id = 1
         self.middle_mask_layer.selected_label = next_id
 
-    # toggle masks when corresponding checkboxes are clicked
-    def toggle_mask(self, gid, state):
+    # --- MAIN ENTRY POINT ---
 
+    def update_panels(self):
+        """Replaces the old, slow update_panels logic."""
+
+        # CHANGED check for image_stacks
+        if self.image_stacks is None or self.masks_stack is None:
+            return
+
+        if self.middle_image_layer is None:
+            self._initialize_layers()
+        else:
+            self._update_layer_data()
+
+    # --- NAVIGATION CLICKS ---
+
+    def next_clicked(self):
+        # check for image_stacks
+        if self.image_stacks is None:
+            return
+
+        # Save current state before moving
+        if self.middle_mask_layer is not None:
+            current_mask = np.array(self.middle_mask_layer.data, copy=True)
+            self.save_new_masks(current_mask)
+
+        # use total_slices
+        self.current_idx = min(self.current_idx + 1, self.total_slices - 1)
+
+        self.update_panels()
+        self.visible_ids = None
+
+    def prev_clicked(self):
+        # check for image_stacks
+        if self.image_stacks is None:
+            return
+
+        # Save current state before moving
+        if self.middle_mask_layer is not None:
+            current_mask = np.array(self.middle_mask_layer.data, copy=True)
+            self.save_new_masks(current_mask)
+
+        self.current_idx = max(0, self.current_idx - 1)
+
+        self.update_panels()
+        self.visible_ids = None
+
+    # --- MASK MUTABILITY & UI METHODS ---
+
+    def save_new_masks(self, current_visible_mask):
+        """
+        Merges new edits from the visible layer with the old persistent mask data,
+        saves the complete result, and tracks new IDs.
+        """
+
+        stack_mask_before = self.masks_stack[
+            self.current_idx
+        ]  # Current persistent mask
+
+        stack_ids_before = np.unique(stack_mask_before)
+        stack_ids_before = stack_ids_before[stack_ids_before != 0]
+
+        # Get all IDs visible in the napari layer (newly painted or edited visible masks)
+        ids_in_visible_layer = np.unique(current_visible_mask)
+        ids_in_visible_layer = ids_in_visible_layer[ids_in_visible_layer != 0]
+
+        # Start the new persistent mask with the old persistent mask (includes hidden masks)
+        new_complete_mask = stack_mask_before.copy()
+
+        # Merge new/edited regions from the visible layer into the complete mask.
+        # This loop ensures that any new painting or editing overwrites the persistent data.
+        for gid in ids_in_visible_layer:
+            # Find the pixels in the visible layer belonging to this ID
+            visible_region = current_visible_mask == gid
+
+            # The new persistent mask retains the visible regions
+            new_complete_mask[visible_region] = gid
+
+        # Find all IDs that were in the stack, but are no longer tracked in the UI list
+        ids_to_delete = [
+            gid for gid in stack_ids_before if gid not in self.current_mask_ids
+        ]
+        for gid in ids_to_delete:
+            new_complete_mask[new_complete_mask == gid] = 0
+
+        # Replace the entire slice in the mutable list with the new, complete mask
+        self.masks_stack[self.current_idx] = new_complete_mask
+
+        # Determine new IDs for UI row addition
+        stack_ids_after = np.unique(new_complete_mask)
+        stack_ids_after = stack_ids_after[stack_ids_after != 0]
+        new_ids = [
+            gid for gid in stack_ids_after if gid not in stack_ids_before
+        ]
+
+        return new_ids
+
+    def toggle_mask(self, gid, state):
         if self.middle_mask_layer is None:
             return
 
-        # Convert to a proper ndarray copy
-        current_mask = np.array(self.middle_mask_layer.data, copy=True)
+        current_visible_mask = np.array(self.middle_mask_layer.data, copy=True)
+        # Use the persistent stack as the source of truth for restoration
+        original_slice_data = self.masks_stack[self.current_idx]
 
-        if state:  # checkbox checked
-            current_mask[self.masks_stack[self.current_idx] == gid] = gid
-        else:  # checkbox unchecked
-            current_mask[current_mask == gid] = 0
+        if state:
+            # SHOW: Restore the pixels matching 'gid' from the original slice data
+            current_visible_mask[original_slice_data == gid] = gid
+        else:
+            # HIDE: Set the pixels matching 'gid' in the current visible data to 0
+            current_visible_mask[current_visible_mask == gid] = 0
 
-        # Assign back to trigger redraw
-        self.middle_mask_layer.data = current_mask
+        self.middle_mask_layer.data = current_visible_mask
 
-    # update mask list, called when next or previous buttons are clicked
-    def update_mask_list(self):
-
-        # clear old checkboxes/buttons
-        for i in reversed(range(self.checkboxLayout.count())):
-            layout_item = self.checkboxLayout.itemAt(i)
-            if layout_item is not None:
-                widget = layout_item.widget()
-                if widget:
-                    widget.setParent(None)
-                else:
-                    # It's a layout (HBoxLayout), so we remove its widgets first
-                    for j in reversed(range(layout_item.count())):
-                        w = layout_item.itemAt(j).widget()
-                        if w:
-                            w.setParent(None)
-
-        # extract current IDs from middle mask
-        mask = self.middle_mask_layer.data
-        mask_ids = np.unique(mask)
-        mask_ids = mask_ids[mask_ids != 0]
-        self.current_mask_ids = mask_ids
-
-        # add checkboxes + delete buttons
-        for gid in mask_ids:
-            row_layout = QHBoxLayout()
-
-            # Checkbox
-            cb = QCheckBox(f"Glom {gid}")
-            cb.setChecked(True)
-            cb.stateChanged.connect(
-                lambda state, g=gid: self.toggle_mask(g, state)
-            )
-            row_layout.addWidget(cb)
-
-            # Delete button
-            btn = QPushButton("Delete")
-            btn.clicked.connect(lambda _, g=gid: self.delete_mask(g))
-            row_layout.addWidget(btn)
-
-            self.checkboxLayout.addLayout(row_layout)
-
-    # if the mask deletion button is pressed
     def delete_mask(self, gid):
         if self.middle_mask_layer is None:
             return
 
-        # Remove from mask data
+        # 1. Update the visible layer
         mask_data = np.array(self.middle_mask_layer.data, copy=True)
         mask_data[mask_data == gid] = 0
         self.middle_mask_layer.data = mask_data
 
-        # Remove from the saved stack as well
+        # 2. Update the saved mutable stack
         self.masks_stack[self.current_idx][
             self.masks_stack[self.current_idx] == gid
         ] = 0
 
-        # Update glom id list
         self.current_mask_ids = [g for g in self.current_mask_ids if g != gid]
 
-        # Remove the corresponding row from the UI
+        # Remove the corresponding row from the UI (unchanged logic)
         for i in range(self.checkboxLayout.count()):
             layout_item = self.checkboxLayout.itemAt(i)
             if layout_item is not None:
                 for j in range(layout_item.count()):
                     w = layout_item.itemAt(j).widget()
                     if isinstance(w, QCheckBox) and w.text() == f"Glom {gid}":
-                        # Remove the entire row layout
                         while layout_item.count():
                             child = layout_item.takeAt(0)
                             if child.widget():
                                 child.widget().deleteLater()
                         self.checkboxLayout.removeItem(layout_item)
-
                         break
 
-    # if the refresh masks button is pressed
     def on_mask_changed(self):
         if self.middle_mask_layer is None:
             return
 
-        # Make a copy of the current mask layer
-        current_mask = np.array(self.middle_mask_layer.data, copy=True)
+        # 1. Capture the list of IDs that are currently visible BEFORE saving/refreshing.
+        current_visible_ids = np.unique(self.middle_mask_layer.data)
+        current_visible_ids = current_visible_ids[current_visible_ids != 0]
 
-        # Save new masks into the original stack and update UI
+        # Store these so update_mask_list() can use them
+        self.visible_ids = set(current_visible_ids.tolist())
+
+        # 2. Trigger the SAVE and ID detection using the currently visible layer data.
+        current_mask = np.array(self.middle_mask_layer.data, copy=True)
         new_ids = self.save_new_masks(current_mask)
 
-        # Add checkboxes + delete buttons only for truly new masks
+        # 3. Add UI rows for any brand new IDs
         for gid in new_ids:
             self.add_mask_row(gid)
 
-        # Set selected_label to next free ID
-        if self.current_mask_ids is not None:
-            self.middle_mask_layer.selected_label = (
-                max(self.current_mask_ids) + 1
-            )
-        else:
-            self.middle_mask_layer.selected_label = 1
+        # 4. Restore the middle mask layer to the full persistent state
+        complete_mask = self.masks_stack[self.current_idx].copy()
+        self.middle_mask_layer.data = complete_mask
 
-    # save masks that have been redrawn or added
-    def save_new_masks(self, current_mask):
+        # 5. Update the UI state (this will REBUILD the checkbox list)
+        self._update_ui_state()
 
-        # get all the mask ids in the current stack
-        stack_mask = self.masks_stack[self.current_idx]
-        stack_ids = np.unique(stack_mask)
-        stack_ids = stack_ids[stack_ids != 0]
-
-        current_ids = np.unique(current_mask)
-        current_ids = current_ids[current_ids != 0]
-
-        # find new mask ids given original id lists
-        new_ids = [gid for gid in current_ids if gid not in stack_ids]
-
-        # merge new masks into the saved stack
-        for gid in new_ids:
-            stack_mask[current_mask == gid] = gid
-
-        # update the stack
-        self.masks_stack[self.current_idx] = stack_mask
-
-        # update the current IDs list (union of old + new)
-        self.current_mask_ids = np.unique(stack_mask)
-        self.current_mask_ids = self.current_mask_ids[
-            self.current_mask_ids != 0
+        # 6. Re-hide masks that were previously hidden
+        ids_to_hide = [
+            gid
+            for gid in np.unique(complete_mask)
+            if gid != 0 and gid not in self.visible_ids
         ]
 
-        return new_ids
+        if ids_to_hide:
+            restored_visible_mask = complete_mask.copy()
+            for gid in ids_to_hide:
+                restored_visible_mask[restored_visible_mask == gid] = 0
+            self.middle_mask_layer.data = restored_visible_mask
 
-    # add a single mask row (checkbox + delete button) to the scroll UI
     def add_mask_row(self, gid):
-
         row_layout = QHBoxLayout()
 
-        # Checkbox
         cb = QCheckBox(f"Glom {gid}")
-        cb.setChecked(True)  # start as visible
+        cb.setChecked(True)
         cb.stateChanged.connect(
             lambda state, g=gid: self.toggle_mask(g, state)
         )
         row_layout.addWidget(cb)
 
-        # Delete button
         btn = QPushButton("Delete")
         btn.clicked.connect(lambda _, g=gid: self.delete_mask(g))
         row_layout.addWidget(btn)
 
-        # Add the row layout to the scroll layout
         self.checkboxLayout.addLayout(row_layout)
 
-    # on nextBtn click
-    def next_clicked(self):
+    def update_mask_list(self):
+        # Clear old rows
+        for i in reversed(range(self.checkboxLayout.count())):
+            layout_item = self.checkboxLayout.itemAt(i)
+            if layout_item is not None:
+                for j in reversed(range(layout_item.count())):
+                    w = layout_item.itemAt(j).widget()
+                    if w:
+                        w.setParent(None)
+                self.checkboxLayout.removeItem(layout_item)
 
-        # check if there is anything loaded first
-        if self.images_stack is None:
-            return
+        # Extract IDs from the current slice
+        mask = self.middle_mask_layer.data
+        mask_ids = np.unique(mask)
+        mask_ids = mask_ids[mask_ids != 0]
+        self.current_mask_ids = mask_ids
 
-        # save masks
-        current_mask = np.array(self.middle_mask_layer.data, copy=True)
-        self.save_new_masks(current_mask)
+        # Build checkbox rows
+        for gid in mask_ids:
+            row_layout = QHBoxLayout()
 
-        # update current index
-        self.current_idx = min(
-            self.current_idx + 1, self.images_stack.shape[0] - 1
-        )
+            cb = QCheckBox(f"Glom {gid}")
 
-        # update all panels/active layers
-        self.update_panels()
+            # Use stored visible_ids (preserved across refresh)
+            if self.visible_ids is not None:
+                cb.setChecked(gid in self.visible_ids)
+            else:
+                cb.setChecked(True)  # default
 
-    # on prevBtn click
-    def prev_clicked(self):
+            cb.stateChanged.connect(
+                lambda state, g=gid: self.toggle_mask(g, state)
+            )
+            row_layout.addWidget(cb)
 
-        # check if there is anything loaded first
-        if self.images_stack is None:
-            return
+            btn = QPushButton("Delete")
+            btn.clicked.connect(lambda _, g=gid: self.delete_mask(g))
+            row_layout.addWidget(btn)
 
-        # save masks
-        current_mask = np.array(self.middle_mask_layer.data, copy=True)
-        self.save_new_masks(current_mask)
+            self.checkboxLayout.addLayout(row_layout)
 
-        # update current index
-        self.current_idx = max(0, self.current_idx - 1)
-
-        # update all panels/active layers
-        self.update_panels()
-
-    # on hideAllBtn click
     def hide_clicked(self):
         if self.middle_mask_layer is None:
             return
 
-        # Create a new zero array of the same shape and dtype
         new_mask = np.zeros_like(
             np.array(self.middle_mask_layer.data, copy=True)
         )
-
-        # Assign it back to the Labels layer to trigger redraw
         self.middle_mask_layer.data = new_mask
 
-        # uncheck all checkboxes
         for i in range(self.checkboxLayout.count()):
             row_layout = self.checkboxLayout.itemAt(i)
             if row_layout is not None:
@@ -429,3 +547,66 @@ class SegmentationEditor(QWidget):
                     w = row_layout.itemAt(j).widget()
                     if isinstance(w, QCheckBox):
                         w.setChecked(False)
+
+    def show_clicked(self):
+        if self.middle_mask_layer is None:
+            return
+
+        original_slice_data = self.masks_stack[self.current_idx]
+        self.middle_mask_layer.data = original_slice_data.copy()
+
+        for i in range(self.checkboxLayout.count()):
+            row_layout = self.checkboxLayout.itemAt(i)
+            if row_layout is not None:
+                for j in range(row_layout.count()):
+                    w = row_layout.itemAt(j).widget()
+                    if isinstance(w, QCheckBox):
+                        w.setChecked(True)
+
+    # --- EXPORT METHODS ---
+
+    def export_masks(self):
+        """Exports the list of edited NumPy arrays back to a stack and saves as TIFF (Stack Export)."""
+
+        if self.middle_mask_layer is not None:
+            current_mask = np.array(self.middle_mask_layer.data, copy=True)
+            self.save_new_masks(current_mask)
+
+        if not self.masks_stack:
+            QMessageBox.warning(
+                self,
+                "Export Error",
+                "No mask data loaded or edited to export.",
+            )
+            return
+
+        file_filter = "TIFF Stack (*.tif);;PNG Image (*.png)"
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self, "Save Edited Masks (Stack)", "", file_filter
+        )
+        if not path:
+            return
+
+        try:
+            final_numpy_stack = np.stack(self.masks_stack, axis=0)
+
+            if ".png" in path.lower() and final_numpy_stack.shape[0] > 1:
+                path = path.replace(".png", ".tif")
+                QMessageBox.warning(
+                    self,
+                    "Warning",
+                    "Multi-slice stack saved as a multi-page TIFF file instead of PNG.",
+                )
+
+            iio.imwrite(path, final_numpy_stack.astype(np.uint16))
+
+            QMessageBox.information(
+                self,
+                "Export Successful",
+                f"Masks saved as a single stack to:\n{path}",
+            )
+
+        except (OSError, ValueError) as e:
+            QMessageBox.critical(
+                self, "Export Failed", f"An error occurred during save:\n{e}"
+            )

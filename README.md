@@ -25,6 +25,8 @@ https://napari.org/stable/plugins/index.html
 
 ## Installation
 
+* ONLY compatible from python 3.10 - 3.13
+
 You can install `seg-gui` via [pip]:
 
 ```
@@ -37,7 +39,6 @@ If napari is not already installed, you can install `seg-gui` with napari and Qt
 pip install "seg-gui[all]"
 ```
 
-
 To install latest development version :
 
 ```
@@ -48,17 +49,22 @@ pip install git+https://github.com/Ananya-Sundararajan/seg-gui.git
 
 ## To Use
 1. Data Formatting
-    Your images and masks should be in separate folders named "images" and "masks" respectively. The images and masks folder should then be in the same directory with no other folders/files in this directory.
+    Your images and masks should be in separate folders named "images" and "masks" respectively ("images" can be named "dapi", "dapi_bg" or "bg" as well). The images and masks folder should then be in the same directory with no other folders/files in this directory.
+
+    ** If you have dapi AND background images:
+    Your images should be in 3 separate folders named "dapi", "bg", and "dapi_bg." Masks should be in a separate folder named "masks." All images and masks should be named by index. The images and masks folders should then be in the same directory with no other folders/files in this directory.
 
 2. Loading the data.
     Open napari and click the Seg Gui plugin. Once the seg-gui plugin is open, you should be able to drag the directory that the images and masks folders are in to the seg_gui docker (not the viewer in the middle, but the right-hand panel) to load. Alternatively, you can selet the directory through the load folder button at the bottom of the docker.
 
 3. Validating the data.
-    You should be able to hide all masks, delete a specific mask, toggle masks individually on and off, toggle layers on and off, and scroll using 'next' and 'previous' buttons. To check a masks validity in neighboring slices, you can hide the current image layers and show the previous image or the next image.
+    Image layers are now stacks of three (if you uploaded dapi, bg, and dapi_bg folders). You can slide through to change which version of the image you want to see. Scroll bar is located at the bottom of the GUI.
+
+    You should be able to hide all masks, delete a specific mask, toggle masks individually on and off, toggle layers on and off, and scroll using 'next' and 'previous' buttons. To check a masks validity in neighboring slices, you can hide the current image layers and show the previous image or the next image (hiding the layers can be done through the lower left-side panel).
 
     After toggling image layers, make sure the mask layer is selected so that you can continue adding masks. You can add masks using napari's layer controls (either paintbrush or polygon work well for our purposes).
 
     ** When adding masks, the most important thing to note is that you must hit the refresh mask button for the system to trigger the saving of the added masks to the original stack and to the list on the panel (was the cleaner way to ensure new masks were always saved).
 
 4. Saving the masks.
-    Select the mask_stack layer, navigate to "Files," and export by clicking "save selected layers."
+    Click the export mask button, and rename/save the file as a .tif or .png. This will save it as a stack, and can be separated through ImageJ or other methods.

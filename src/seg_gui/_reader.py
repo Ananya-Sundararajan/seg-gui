@@ -1,113 +1,129 @@
-"""
-This module is an example of a barebones numpy reader plugin for napari.
-
-It implements the Reader specification, but your plugin may choose to
-implement multiple readers or even other plugin contributions. see:
-https://napari.org/stable/plugins/building_a_plugin/guides.html#readers
-"""
-
 from pathlib import Path
 
-import imageio
+import dask.array as da
+import imageio.v3 as iio
 import numpy as np
-import tifffile as tiff
+from dask import delayed
 from natsort import natsorted
+
+# Define the expected folder names for the image channels
+IMAGE_FOLDER_NAMES = [
+    "dapi",
+    "bg",
+    "dapi_bg",
+    "images",
+]  # Added "images" for potential backward compatibility
+MASK_FOLDER_NAME = "masks"
 
 
 def napari_get_reader(path):
-    """An implementation of a Reader contribution.
 
-    Parameters
-    ----------
-    path : str or list of str
-        Path to file, or list of paths.
-
-    Returns
-    -------
-    function or None
-        If the path is a recognized format, return a function that accepts the
-        same path or list of paths, and returns a list of layer data tuples.
-    """
     path = Path(path)
 
-    # if we know we cannot read the file, we immediately return None.
     if not path.is_dir():
         return None
 
-    # otherwise we return the *function* that can read ``path``.
     return reader_function
 
 
-def reader_function(path):
-    """Take a path or list of paths and return a list of LayerData tuples.
+def reader_function(path) -> list[tuple[da.Array, dict, str]]:
 
-    Readers are expected to return data as a list of tuples, where each tuple
-    is (data, [add_kwargs, [layer_type]]), "add_kwargs" and "layer_type" are
-    both optional.
-
-    Parameters
-    ----------
-    path : str or list of str
-        Path to file, or list of paths.
-
-    Returns
-    -------
-    layer_data : list of tuples
-        A list of LayerData tuples where each tuple in the list contains
-        (data, metadata, layer_type), where data is a numpy array, metadata is
-        a dict of keyword arguments for the corresponding viewer.add_* method
-        in napari, and layer_type is a lower-case string naming the type of
-        layer. Both "meta", and "layer_type" are optional. napari will
-        default to layer_type=="image" if not provided
-    """
     path = Path(path)
 
-    # paths
-    image_dir = path / "images"
-    mask_dir = path / "masks"
+    # 1. Identify all existing folders and collect metadata
 
-    if not image_dir.exists() or not mask_dir.exists():
+    # Store tuples of (folder_path, layer_name, layer_type)
+    all_inputs: list[tuple[Path, str, str]] = []
+
+    # Check for image folders, prioritizing DAPI/BG over generic 'images'
+    for name in IMAGE_FOLDER_NAMES:
+        image_dir = path / name
+        if image_dir.exists():
+            # If multiple image folders exist, all are added here.
+            all_inputs.append((image_dir, name, "image"))
+
+    # Check for the mandatory mask folder
+    mask_dir = path / MASK_FOLDER_NAME
+    if mask_dir.exists():
+        all_inputs.append((mask_dir, MASK_FOLDER_NAME, "labels"))
+
+    # --- Validation ---
+    num_image_stacks = len([t for t in all_inputs if t[2] == "image"])
+    has_mask_stack = any(t[2] == "labels" for t in all_inputs)
+
+    if num_image_stacks == 0 or not has_mask_stack:
         raise ValueError(
-            "Input directory must contain 'images/' and 'masks/' subfolders."
+            f"Input directory must contain at least one image folder "
+            f"({', '.join(IMAGE_FOLDER_NAMES)}) and the '{MASK_FOLDER_NAME}' folder."
         )
 
-    image_ext = next(
-        image_dir.glob("*.*")
-    ).suffix  # take the first file's suffix
-    mask_ext = next(mask_dir.glob("*.*")).suffix
+    # 2. Determine metadata (shape/dtype) from the first image stack found
 
-    # Collect files
-    image_files = (
-        natsorted(list(image_dir.glob("*.tif")))
-        if image_ext == ".tif"
-        else natsorted(list(image_dir.glob("*.png")))
-    )
-    mask_files = (
-        natsorted(list(mask_dir.glob("*.tif")))
-        if mask_ext == ".tif"
-        else natsorted(list(mask_dir.glob("*.png")))
-    )
+    first_image_input = [t for t in all_inputs if t[2] == "image"][0]
+    first_image_dir = first_image_input[0]
 
-    if len(image_files) == 0:
-        raise ValueError("No .tif or .png files found in images/.")
-    if len(mask_files) == 0:
-        raise ValueError("No .tif or .png files found in masks/.")
+    def get_files(directory):
+        # Find the first file's extension to determine the file type
+        # try:
+        ext = next(directory.glob("*.*")).suffix
+        # except StopIteration:
+        #    raise ValueError(f"Subfolder '{directory.name}/' is empty.")
 
-    # Load into stacks
-    if image_ext == ".tif":
-        images = [tiff.imread(f) for f in image_files]
-    else:
-        images = [imageio.imread(f) for f in image_files]
+        files = natsorted(list(directory.glob(f"*{ext}")))
+        if not files:
+            raise ValueError(
+                f"No files found in {directory.name}/ with extension {ext}."
+            )
+        return files, ext
 
-    if mask_ext == ".tif":
-        masks = [tiff.imread(f) for f in mask_files]
-    else:
-        masks = [imageio.imread(f) for f in mask_files]
+    # Load the first image to define the required shape/dtype metadata for Dask
+    image_files, _ = get_files(first_image_dir)
+    first_image = iio.imread(image_files[0])
+    metadata_shape = first_image.shape
+    metadata_dtype = first_image.dtype
 
-    images_stack = np.stack(images)
-    masks_stack = np.stack(masks)
+    # 3. Create Dask Stacks for ALL found folders
+    dask_stacks_to_return = []
 
-    return [
-        (images_stack, {"name": "images_stack"}, "image"),
-        (masks_stack, {"name": "masks_stack"}, "labels"),
-    ]
+    for directory, name, layer_type in all_inputs:
+
+        current_files, current_ext = get_files(directory)
+
+        # All images must have the same number of slices/files
+        if len(current_files) != len(image_files):
+            raise ValueError(
+                f"File count mismatch: '{name}/' has {len(current_files)} files, "
+                f"but expected {len(image_files)} (from {first_image_dir.name}/)."
+            )
+
+        # Use the metadata from the first image stack for all stacks
+        current_dtype = metadata_dtype
+        current_shape = metadata_shape
+
+        # For mask data, we must ensure the dtype is suitable for labels (integers)
+        if layer_type == "labels":
+            # Use uint16 as a safe default for labels unless the image is clearly smaller
+            current_dtype = np.uint16
+            current_shape = (
+                metadata_shape  # Shape remains the same (H, W) or (H, W, 1)
+            )
+
+        dask_chunks = []
+        for f in current_files:
+            # Create a Dask array chunk for each file, lazy loading
+            delayed_read = delayed(iio.imread)(f)
+            dask_chunks.append(
+                da.from_delayed(
+                    delayed_read, shape=current_shape, dtype=current_dtype
+                )
+            )
+
+        # Stack the list of Dask chunks into one large Dask array (still LAZYLY)
+        stack = da.stack(dask_chunks, axis=0)
+
+        # 4. Define napari layer data structure
+        layer_data = (stack, {"name": f"{name}_stack"}, layer_type)
+        dask_stacks_to_return.append(layer_data)
+
+    # This list will contain the DAPI stack(s) first, followed by the MASK stack.
+    return dask_stacks_to_return
