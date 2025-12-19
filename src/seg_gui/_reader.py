@@ -180,46 +180,36 @@ def reader_function(path):
         ("masks", "Masks", "labels")
     ]
 
-    # 2. Determine metadata shape from the first available image
-    # We need a consistent shape for Dask to stack them
-    sample_path = None
-    for folder, _, _ in folder_map:
-        dir_path = path / folder
-        if dir_path.exists():
-            valid_files = get_files(dir_path)
-            if valid_files:
-                sample_path = valid_files[0]
-                break
-    
-    if not sample_path:
-        return []
-
-    sample_img = safe_read(sample_path)
-    metadata_shape = sample_img.shape
-    metadata_dtype = sample_img.dtype
-
     # 3. Build Dask stacks for each existing folder
     for folder_name, layer_name, layer_type in folder_map:
         dir_path = path / folder_name
-        
-        if dir_path.exists():
-            current_files = get_files(dir_path)
-            
-            dask_chunks = []
-            for f in current_files:
-                delayed_read = delayed(safe_read)(f)
-                dask_chunks.append(
-                    da.from_delayed(
-                        delayed_read, 
-                        shape=metadata_shape, 
-                        dtype=metadata_dtype
-                    )
+
+        if not dir_path.exists():
+            continue
+
+        current_files = get_files(dir_path)
+        if not current_files:
+            continue
+
+        # 🔑 FIX: detect shape + dtype PER FOLDER
+        first_img = safe_read(current_files[0])
+        metadata_shape = first_img.shape
+        metadata_dtype = first_img.dtype
+
+        dask_chunks = []
+        for f in current_files:
+            delayed_read = delayed(safe_read)(f)
+            dask_chunks.append(
+                da.from_delayed(
+                    delayed_read,
+                    shape=metadata_shape,
+                    dtype=metadata_dtype,
                 )
-            
-            # Stack all images into a single 3D array (Z, H, W)
-            stack = da.stack(dask_chunks, axis=0)
-            
-            # Return data, metadata dictionary, and layer type
-            results.append((stack, {"name": layer_name}, layer_type))
+            )
+
+        # Stack all images into a single 3D array (Z, H, W)
+        stack = da.stack(dask_chunks, axis=0)
+
+        results.append((stack, {"name": layer_name}, layer_type))
 
     return results
