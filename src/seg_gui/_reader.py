@@ -105,111 +105,132 @@ def reader_function(path) -> list[tuple[da.Array, dict, str]]:
 
     return dask_stacks_to_return
 '''
-import numpy as np
-import imageio.v3 as iio
 from pathlib import Path
+
 import dask.array as da
+import imageio.v3 as iio
+import numpy as np
 from dask import delayed
 from natsort import natsorted
 
-# Supported extensions
-EXTENSIONS = {".tif", ".tiff", ".png", ".TIF", ".TIFF", ".PNG"}
+# Define the expected folder names for the image channels
+IMAGE_FOLDER_NAMES = [
+    "dapi",
+    "bg",
+    "dapi_bg",
+    "images",
+]  # Added "images" for potential backward compatibility
+MASK_FOLDER_NAME = "masks"
+
 
 def napari_get_reader(path):
-    """Entry point for napari to recognize this plugin as a reader."""
-    if isinstance(path, list):
-        path = path[0]
+
     path = Path(path)
-    
-    # If the path is a directory, we return our reader function
-    if path.is_dir():
-        return reader_function
-    return None
 
-def safe_read(file_path):
-    """
-    Standardizes image loading across platforms.
-    Ensures output is 2D (H, W). Handles RGB TIFFs/PNGs by taking one channel.
-    """
-    img = iio.imread(file_path)
-    
-    # 1. Remove singleton dimensions (e.g., (1, H, W) -> (H, W))
-    img = np.squeeze(img)
-    
-    # 2. Handle Multichannel/RGB (H, W, 3) or (H, W, 4)
-    if img.ndim == 3:
-        # If the last dimension is 3 or 4, it's likely RGB/A
-        if img.shape[-1] in [3, 4]:
-            return img[..., 0]
-        # If the first dimension is 3 or 4, it's likely Channel-first
-        elif img.shape[0] in [3, 4]:
-            return img[0, ...]
-            
-    return img
+    if not path.is_dir():
+        return None
 
-def get_files(directory):
-    """
-    Finds valid image files while ignoring hidden system files like .DS_Store
-    or Windows thumbnail files.
-    """
-    files = []
-    for ext in EXTENSIONS:
-        # Ignore hidden files starting with '.'
-        valid_files = [
-            f for f in directory.glob(f"*{ext}") 
-            if not f.name.startswith(".")
-        ]
-        files.extend(valid_files)
-    
-    if not files:
-        raise ValueError(f"No valid images found in {directory}")
-    
-    # Natural sorting ensures 'image_2.tif' comes before 'image_10.tif'
-    return natsorted(files)
+    return reader_function
 
-def reader_function(path):
-    """The actual function that loads the data into napari layers."""
+
+def reader_function(path) -> list[tuple[da.Array, dict, str]]:
+
     path = Path(path)
-    results = []
 
-    # 1. Define folder mapping: (folder_name, layer_name, layer_type)
-    folder_map = [
-        ("dapi", "DAPI", "image"),
-        ("bg", "Background", "image"),
-        ("images", "Images", "image"),
-        ("masks", "Masks", "labels")
-    ]
+    # 1. Identify all existing folders and collect metadata
 
-    # 3. Build Dask stacks for each existing folder
-    for folder_name, layer_name, layer_type in folder_map:
-        dir_path = path / folder_name
+    # Store tuples of (folder_path, layer_name, layer_type)
+    all_inputs: list[tuple[Path, str, str]] = []
 
-        if not dir_path.exists():
-            continue
+    # Check for image folders, prioritizing DAPI/BG over generic 'images'
+    for name in IMAGE_FOLDER_NAMES:
+        image_dir = path / name
+        if image_dir.exists():
+            # If multiple image folders exist, all are added here.
+            all_inputs.append((image_dir, name, "image"))
 
-        current_files = get_files(dir_path)
-        if not current_files:
-            continue
+    # Check for the mandatory mask folder
+    mask_dir = path / MASK_FOLDER_NAME
+    if mask_dir.exists():
+        all_inputs.append((mask_dir, MASK_FOLDER_NAME, "labels"))
 
-        # 🔑 FIX: detect shape + dtype PER FOLDER
-        first_img = safe_read(current_files[0])
-        metadata_shape = first_img.shape
-        metadata_dtype = first_img.dtype
+    # --- Validation ---
+    num_image_stacks = len([t for t in all_inputs if t[2] == "image"])
+    has_mask_stack = any(t[2] == "labels" for t in all_inputs)
+
+    if num_image_stacks == 0 or not has_mask_stack:
+        raise ValueError(
+            f"Input directory must contain at least one image folder "
+            f"({', '.join(IMAGE_FOLDER_NAMES)}) and the '{MASK_FOLDER_NAME}' folder."
+        )
+
+    # 2. Determine metadata (shape/dtype) from the first image stack found
+
+    first_image_input = [t for t in all_inputs if t[2] == "image"][0]
+    first_image_dir = first_image_input[0]
+
+    def get_files(directory):
+        # Find the first file's extension to determine the file type
+        #try:
+        ext = next(directory.glob("*.*")).suffix
+        #except StopIteration:
+        #    raise ValueError(f"Subfolder '{directory.name}/' is empty.")
+
+        files = natsorted(list(directory.glob(f"*{ext}")))
+        if not files:
+            raise ValueError(
+                f"No files found in {directory.name}/ with extension {ext}."
+            )
+        return files, ext
+
+    # Load the first image to define the required shape/dtype metadata for Dask
+    image_files, _ = get_files(first_image_dir)
+    first_image = iio.imread(image_files[0])
+    metadata_shape = first_image.shape
+    metadata_dtype = first_image.dtype
+
+    # 3. Create Dask Stacks for ALL found folders
+    dask_stacks_to_return = []
+
+    for directory, name, layer_type in all_inputs:
+
+        current_files, current_ext = get_files(directory)
+
+        # All images must have the same number of slices/files
+        if len(current_files) != len(image_files):
+            raise ValueError(
+                f"File count mismatch: '{name}/' has {len(current_files)} files, "
+                f"but expected {len(image_files)} (from {first_image_dir.name}/)."
+            )
+
+        # Use the metadata from the first image stack for all stacks
+        current_dtype = metadata_dtype
+        current_shape = metadata_shape
+
+        # For mask data, we must ensure the dtype is suitable for labels (integers)
+        if layer_type == "labels":
+            # Use uint16 as a safe default for labels unless the image is clearly smaller
+            current_dtype = np.uint16
+            current_shape = (
+                metadata_shape  # Shape remains the same (H, W) or (H, W, 1)
+            )
 
         dask_chunks = []
         for f in current_files:
-            delayed_read = delayed(safe_read)(f)
+            # Create a Dask array chunk for each file, lazy loading
+            delayed_read = delayed(iio.imread)(f)
             dask_chunks.append(
                 da.from_delayed(
-                    delayed_read,
-                    shape=metadata_shape,
-                    dtype=metadata_dtype,
+                    delayed_read, shape=current_shape, dtype=current_dtype
                 )
             )
 
-        # Stack all images into a single 3D array (Z, H, W)
+        # Stack the list of Dask chunks into one large Dask array (still LAZYLY)
         stack = da.stack(dask_chunks, axis=0)
 
-        results.append((stack, {"name": layer_name}, layer_type))
+        # 4. Define napari layer data structure
+        layer_data = (stack, {"name": f"{name}_stack"}, layer_type)
+        dask_stacks_to_return.append(layer_data)
 
-    return results
+    # This list will contain the DAPI stack(s) first, followed by the MASK stack.
+    return dask_stacks_to_return
