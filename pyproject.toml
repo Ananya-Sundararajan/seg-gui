@@ -37,7 +37,7 @@ dependencies = [
     "napari",
     "scikit-image",
     "dask",
-    "pyqt6"
+    "qtpy"
 ]
 
 [project.optional-dependencies]
