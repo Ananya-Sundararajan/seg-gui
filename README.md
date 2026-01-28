@@ -1,11 +1,6 @@
 # seg-gui
 
-'[![License MIT](https://img.shields.io/pypi/l/seg-gui.svg?color=green)](https://github.com/Ananya-Sundararajan/seg-gui/raw/main/LICENSE)'
-'[![PyPI](https://img.shields.io/pypi/v/seg-gui.svg?color=green)](https://pypi.org/project/seg-gui)'
-'[![Python Version](https://img.shields.io/pypi/pyversions/seg-gui.svg?color=green)](https://python.org)'
 [![tests](https://github.com/Ananya-Sundararajan/seg-gui/workflows/tests/badge.svg)](https://github.com/Ananya-Sundararajan/seg-gui/actions)
-'[![codecov](https://codecov.io/gh/Ananya-Sundararajan/seg-gui/branch/main/graph/badge.svg)](https://codecov.io/gh/Ananya-Sundararajan/seg-gui)'
-'[![napari hub](https://img.shields.io/endpoint?url=https://api.napari-hub.org/shields/seg-gui)](https://napari-hub.org/plugins/seg-gui)'
 [![npe2](https://img.shields.io/badge/plugin-npe2-blue?link=https://napari.org/stable/plugins/index.html)](https://napari.org/stable/plugins/index.html)
 [![Copier](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/copier-org/copier/master/img/badge/badge-grayscale-inverted-border-purple.json)](https://github.com/copier-org/copier)
 
