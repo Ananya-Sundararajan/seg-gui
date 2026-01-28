@@ -13,6 +13,7 @@ from qtpy.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from pathlib import Path
 
 if TYPE_CHECKING:
     import napari
@@ -39,6 +40,7 @@ class SegmentationEditor(QWidget):
         self.visible_ids = None
 
         self.current_mask_ids = []
+        self.mask_filenames: list[str] = []
 
         self.setAcceptDrops(True)
 
@@ -61,8 +63,11 @@ class SegmentationEditor(QWidget):
         self.showAllBtn = QPushButton("Show All")
         self.showAllBtn.clicked.connect(self.show_clicked)
 
-        self.exportStackBtn = QPushButton("Export Masks (Stack)")
+        self.exportStackBtn = QPushButton("Export Masks as Stack")
         self.exportStackBtn.clicked.connect(self.export_masks)
+
+        self.exportIndivBtn = QPushButton("Export Masks as Images")
+        self.exportIndivBtn.clicked.connect(self.export_individual_masks)
 
         """ Layouts """
         mainLayout = QVBoxLayout()
@@ -77,8 +82,9 @@ class SegmentationEditor(QWidget):
         togLayout.addWidget(self.hideAllBtn)
         togLayout.addWidget(self.showAllBtn)
 
-        exportLayout = QHBoxLayout()
+        exportLayout = QVBoxLayout()
         exportLayout.addWidget(self.exportStackBtn)
+        exportLayout.addWidget(self.exportIndivBtn)
 
         self.checkboxArea = QScrollArea()
         self.checkboxContainer = QWidget()
@@ -99,16 +105,23 @@ class SegmentationEditor(QWidget):
     # --- DATA LOADING --
 
     def load_folder(self):
-        folder = QFileDialog.getExistingDirectory(
-            self, "Select Dataset Folder"
-        )
-        if not folder:
-            return
+        folder = QFileDialog.getExistingDirectory(self, "Select Dataset Folder")
+
+        if not folder: return
+
         from ._reader import reader_function
 
         # reader_function returns a list of tuples: [(img1_da, ...), (img2_da, ...), ..., (mask_da, ...)]
         layer_data = reader_function(folder)
 
+        mask_tuple = layer_data.pop() 
+        masks_stack = mask_tuple[0]
+        self.mask_filenames = mask_tuple[1].get("filenames", [])
+
+        # Remaining items are image stacks
+        image_stacks = [data[0] for data in layer_data]
+
+        '''
         # Extract only the Dask arrays (index [0] of each tuple)
         all_dask_stacks = [data[0] for data in layer_data]
 
@@ -117,6 +130,7 @@ class SegmentationEditor(QWidget):
 
         # The remaining items are the image channel stacks (now a list of Dask arrays)
         image_stacks = all_dask_stacks
+        '''
 
         # Pass the list of image stacks and the single mask stack to load_data
         self.load_data(image_stacks, masks_stack)
@@ -598,7 +612,7 @@ class SegmentationEditor(QWidget):
                     "Multi-slice stack saved as a multi-page TIFF file instead of PNG.",
                 )
 
-            iio.imwrite(path, final_numpy_stack.astype(np.uint16))
+            iio.imwrite(path, final_numpy_stack.astype(np.uint32))
 
             QMessageBox.information(
                 self,
@@ -610,3 +624,47 @@ class SegmentationEditor(QWidget):
             QMessageBox.critical(
                 self, "Export Failed", f"An error occurred during save:\n{e}"
             )
+
+    def export_individual_masks(self):
+        """Saves each slice in self.masks_stack as a separate file."""
+        
+        # sync current edits first
+        if self.middle_mask_layer is not None:
+            current_mask = np.array(self.middle_mask_layer.data, copy=True)
+            self.save_new_masks(current_mask)
+
+        if not self.masks_stack or not self.mask_filenames:
+            QMessageBox.warning(self, "Export Error", "No mask data or filenames found.")
+            return
+        
+        dialog = QFileDialog(self)
+        dialog.setWindowTitle("Select or Create Output Folder")
+        dialog.setFileMode(QFileDialog.Directory)
+        dialog.setOption(QFileDialog.ShowDirsOnly, True)
+        dialog.setLabelText(QFileDialog.Accept, "Save") 
+
+        if dialog.exec_():
+            # Get the path from THIS dialog
+            selected_dirs = dialog.selectedFiles()
+            if not selected_dirs:
+                return
+            output_path = Path(selected_dirs[0])
+        else:
+            return # User canceled
+
+        try:
+            for i, mask_slice in enumerate(self.masks_stack):
+                filename = self.mask_filenames[i]
+                save_path = output_path / filename
+                
+                # Use imageio to write the individual numpy array
+                iio.imwrite(save_path, mask_slice.astype(np.uint32))
+
+            QMessageBox.information(
+                self, 
+                "Export Successful", 
+                f"Saved {len(self.masks_stack)} masks to:\n{output_path}"
+            )
+
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", f"An error occurred:\n{e}")

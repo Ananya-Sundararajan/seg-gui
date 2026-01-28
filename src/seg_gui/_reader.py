@@ -75,7 +75,7 @@ def get_files(directory: Path) -> List[Path]:
 def reader_function(path) -> List[Tuple[da.Array, dict, str]]:
     path = Path(path)
 
-    # 1. Discover folders
+    # Discover folders
     inputs: List[Tuple[Path, str, str]] = []
 
     for name in IMAGE_FOLDER_NAMES:
@@ -96,7 +96,7 @@ def reader_function(path) -> List[Tuple[da.Array, dict, str]]:
             f"({', '.join(IMAGE_FOLDER_NAMES)}) and a '{MASK_FOLDER_NAME}' folder."
         )
 
-    # 2. Establish reference metadata from FIRST IMAGE STACK
+    # Establish reference metadata from FIRST IMAGE STACK
     first_image_dir = next(p for p, _, t in inputs if t == "image")
     image_files = get_files(first_image_dir)
 
@@ -105,7 +105,7 @@ def reader_function(path) -> List[Tuple[da.Array, dict, str]]:
     metadata_dtype = first_img.dtype
     expected_length = len(image_files)
 
-    # 3. Build Dask stacks
+    # Build Dask stacks
     results = []
 
     for directory, name, layer_type in inputs:
@@ -136,12 +136,11 @@ def reader_function(path) -> List[Tuple[da.Array, dict, str]]:
 
         stack = da.stack(dask_chunks, axis=0)
 
-        results.append(
-            (
-                stack,
-                {"name": f"{name}_stack"},
-                layer_type,
-            )
-        )
+        metadata = {
+            "name": f"{name}_stack",
+            "filenames": [f.name for f in current_files] 
+        }
+
+        results.append((stack, metadata, layer_type))
 
     return results
