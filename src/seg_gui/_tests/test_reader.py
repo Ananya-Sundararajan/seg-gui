@@ -1,31 +1,48 @@
 import numpy as np
-
+import imageio.v3 as iio
 from seg_gui import napari_get_reader
+from pathlib import Path
 
-
-# tmp_path is a pytest fixture
 def test_reader(tmp_path):
-    """An example of how you might test your plugin."""
+    # 1. Setup: Create the folder structure your reader expects
+    img_dir = tmp_path / "images"
+    mask_dir = tmp_path / "masks"
+    img_dir.mkdir()
+    mask_dir.mkdir()
 
-    # write some fake data using your supported file format
-    my_test_file = str(tmp_path / "myfile.npy")
-    original_data = np.random.rand(20, 20)
-    np.save(my_test_file, original_data)
+    # 2. Create fake image and mask files (must have same name and count)
+    test_name = "test_01.tif"
+    fake_image = np.zeros((10, 10), dtype=np.uint8)
+    fake_mask = np.zeros((10, 10), dtype=np.uint16)
 
-    # try to read it back in
-    reader = napari_get_reader(my_test_file)
+    iio.imwrite(img_dir / test_name, fake_image)
+    iio.imwrite(mask_dir / test_name, fake_mask)
+
+    # 3. Test: Get the reader
+    # napari_get_reader should return a function when given a directory
+    reader = napari_get_reader(str(tmp_path))
     assert callable(reader)
 
-    # make sure we're delivering the right format
-    layer_data_list = reader(my_test_file)
-    assert isinstance(layer_data_list, list) and len(layer_data_list) > 0
-    layer_data_tuple = layer_data_list[0]
-    assert isinstance(layer_data_tuple, tuple) and len(layer_data_tuple) > 0
+    # 4. Test: Run the reader
+    layer_data_list = reader(str(tmp_path))
 
-    # make sure it's the same as it started
-    np.testing.assert_allclose(original_data, layer_data_tuple[0])
+    # We expect 2 layers: one for 'images' and one for 'masks'
+    assert isinstance(layer_data_list, list)
+    assert len(layer_data_list) == 2
 
+    # Verify the image layer data
+    image_data = layer_data_list[0][0]
+    assert image_data.shape == (1, 10, 10)  # (Stack size, H, W)
 
-def test_get_reader_pass():
-    reader = napari_get_reader("fake.file")
+    # Verify filenames were captured in metadata (as we added to your reader)
+    metadata = layer_data_list[1][1] # Mask layer metadata
+    assert "filenames" in metadata
+    assert metadata["filenames"][0] == test_name
+
+def test_get_reader_returns_none_for_file(tmp_path):
+    # Your reader specifically returns None if the path is a file, not a dir
+    fake_file = tmp_path / "not_a_folder.tif"
+    fake_file.write_text("dummy")
+    
+    reader = napari_get_reader(str(fake_file))
     assert reader is None
